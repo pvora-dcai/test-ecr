@@ -1,0 +1,220 @@
+name: Run ECS Task from ECR
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_definition_revision:
+        description: 'Task definition revision (leave empty for latest)'
+        required: false
+        type: string
+        default: ''
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ROLE_ARN: arn:aws:iam::255203429490:role/prim-shared-services-ci-cd-github-oidc-role-01
+  ECR_REPOSITORY: prim-dev-p8-dbf-dataloader-ecr-01
+  TASK_DEFINITION: prim-dev-p8-dbf-dataloader-td-01
+  ECS_CLUSTER: prim-dev-p8-ecs-cluster-01
+  SECURITY_GROUP: sg-0962c7ddb087f3301
+  SUBNET_1: subnet-0fb87fc54da817fd7
+  SUBNET_2: subnet-01e761524c4d14e68
+
+jobs:
+  run-ecs-task:
+    name: Run ECS Task
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-ECS-Task-Runner
+
+      - name: Get latest ECR image
+        id: get-image
+        run: |
+          echo "Getting latest image from ECR repository: ${{ env.ECR_REPOSITORY }}"
+          
+          # Get account ID
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          
+          # Get the latest image (by push date)
+          LATEST_IMAGE=$(aws ecr describe-images \
+            --repository-name ${{ env.ECR_REPOSITORY }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'sort_by(imageDetails,&imagePushedAt)[-1]' \
+            --output json)
+          
+          # Extract image digest
+          IMAGE_DIGEST=$(echo $LATEST_IMAGE | jq -r '.imageDigest')
+          
+          # Try to get image tag (prefer 'latest' if available, otherwise first tag)
+          IMAGE_TAG=$(echo $LATEST_IMAGE | jq -r '.imageTags[0] // empty')
+          
+          if [ -z "${IMAGE_TAG}" ]; then
+            # If no tag, use digest
+            FULL_IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${IMAGE_DIGEST}"
+            echo "Using image by digest (no tags found): ${IMAGE_DIGEST}"
+          else
+            FULL_IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${IMAGE_TAG}"
+            echo "Latest image tag: ${IMAGE_TAG}"
+          fi
+          
+          echo "Full image URI: ${FULL_IMAGE_URI}"
+          echo "image_uri=${FULL_IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+
+      - name: Update task definition with latest image
+        id: update-task-def
+        run: |
+          echo "Updating task definition with latest image..."
+          
+          # Get current task definition
+          if [ -z "${{ inputs.task_definition_revision }}" ]; then
+            TASK_DEF=$(aws ecs describe-task-definition \
+              --task-definition ${{ env.TASK_DEFINITION }} \
+              --region ${{ env.AWS_REGION }} \
+              --query 'taskDefinition' \
+              --output json)
+          else
+            TASK_DEF=$(aws ecs describe-task-definition \
+              --task-definition ${{ env.TASK_DEFINITION }}:${{ inputs.task_definition_revision }} \
+              --region ${{ env.AWS_REGION }} \
+              --query 'taskDefinition' \
+              --output json)
+          fi
+          
+          # Update container image with latest image
+          UPDATED_TASK_DEF=$(echo $TASK_DEF | jq --arg IMAGE "${{ steps.get-image.outputs.image_uri }}" '.containerDefinitions[0].image = $IMAGE')
+          
+          # Remove fields that can't be included in register-task-definition
+          UPDATED_TASK_DEF=$(echo $UPDATED_TASK_DEF | jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)')
+          
+          # Register new task definition revision
+          NEW_TASK_DEF=$(aws ecs register-task-definition \
+            --cli-input-json "$UPDATED_TASK_DEF" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskDefinition' \
+            --output json)
+          
+          NEW_REVISION=$(echo $NEW_TASK_DEF | jq -r '.revision')
+          echo "✅ Created new task definition revision: ${NEW_REVISION}"
+          echo "revision=${NEW_REVISION}" >> $GITHUB_OUTPUT
+
+      - name: Run ECS task
+        id: run-task
+        run: |
+          echo "Running ECS task..."
+          echo "Cluster: ${{ env.ECS_CLUSTER }}"
+          echo "Task Definition: ${{ env.TASK_DEFINITION }}:${{ steps.update-task-def.outputs.revision }}"
+          echo "Image: ${{ steps.get-image.outputs.image_uri }}"
+          
+          TASK_ARN=$(aws ecs run-task \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --task-definition ${{ env.TASK_DEFINITION }}:${{ steps.update-task-def.outputs.revision }} \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[${{ env.SUBNET_1 }},${{ env.SUBNET_2 }}],securityGroups=[${{ env.SECURITY_GROUP }}],assignPublicIp=ENABLED}" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'tasks[0].taskArn' \
+            --output text)
+          
+          if [ "$TASK_ARN" = "None" ] || [ -z "$TASK_ARN" ]; then
+            echo "❌ Failed to start ECS task"
+            exit 1
+          fi
+          
+          echo "✅ Task started successfully"
+          echo "Task ARN: ${TASK_ARN}"
+          echo "task_arn=${TASK_ARN}" >> $GITHUB_OUTPUT
+          
+          # Extract task ID for easier reference
+          TASK_ID=$(echo ${TASK_ARN} | awk -F'/' '{print $NF}')
+          echo "Task ID: ${TASK_ID}"
+          echo "task_id=${TASK_ID}" >> $GITHUB_OUTPUT
+
+      - name: Wait for task completion
+        run: |
+          TASK_ARN="${{ steps.run-task.outputs.task_arn }}"
+          echo "Waiting for task to complete: ${TASK_ARN}"
+          
+          aws ecs wait tasks-stopped \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --tasks ${TASK_ARN} \
+            --region ${{ env.AWS_REGION }}
+          
+          echo "Task completed"
+
+      - name: Get task exit code
+        id: task-status
+        run: |
+          TASK_ARN="${{ steps.run-task.outputs.task_arn }}"
+          
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --tasks ${TASK_ARN} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'tasks[0].containers[0].exitCode' \
+            --output text)
+          
+          STOPPED_REASON=$(aws ecs describe-tasks \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --tasks ${TASK_ARN} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'tasks[0].stoppedReason' \
+            --output text)
+          
+          echo "Exit Code: ${EXIT_CODE}"
+          echo "Stopped Reason: ${STOPPED_REASON}"
+          echo "exit_code=${EXIT_CODE}" >> $GITHUB_OUTPUT
+          
+          if [ "${EXIT_CODE}" != "0" ] && [ "${EXIT_CODE}" != "None" ]; then
+            echo "❌ Task failed with exit code: ${EXIT_CODE}"
+            echo "Stopped reason: ${STOPPED_REASON}"
+            exit 1
+          else
+            echo "✅ Task completed successfully"
+          fi
+
+      - name: Display task logs
+        if: always()
+        run: |
+          TASK_ARN="${{ steps.run-task.outputs.task_arn }}"
+          
+          # Get log group name from task definition
+          LOG_GROUP=$(aws ecs describe-task-definition \
+            --task-definition ${{ env.TASK_DEFINITION }}:${{ steps.update-task-def.outputs.revision }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskDefinition.containerDefinitions[0].logConfiguration.options."awslogs-group"' \
+            --output text)
+          
+          if [ -n "${LOG_GROUP}" ] && [ "${LOG_GROUP}" != "None" ]; then
+            echo "Fetching logs from: ${LOG_GROUP}"
+            
+            # Get log stream name
+            LOG_STREAM=$(aws logs describe-log-streams \
+              --log-group-name ${LOG_GROUP} \
+              --region ${{ env.AWS_REGION }} \
+              --order-by LastEventTime \
+              --descending \
+              --max-items 1 \
+              --query 'logStreams[0].logStreamName' \
+              --output text)
+            
+            if [ -n "${LOG_STREAM}" ] && [ "${LOG_STREAM}" != "None" ]; then
+              echo "Log stream: ${LOG_STREAM}"
+              echo ""
+              echo "=== Task Logs ==="
+              aws logs get-log-events \
+                --log-group-name ${LOG_GROUP} \
+                --log-stream-name ${LOG_STREAM} \
+                --region ${{ env.AWS_REGION }} \
+                --query 'events[*].message' \
+                --output text
+            else
+              echo "No log stream found"
+            fi
+          else
+            echo "No CloudWatch log group configured for this task"
+          fi
