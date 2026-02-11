@@ -37,11 +37,7 @@ jobs:
         terraform_version: ${{ env.TF_VERSION }}
 
     - name: Terraform Init
-      run: terraform init \
-        -backend-config="bucket=test-terraform-github" \
-        -backend-config="key=terraform.tfstate" \
-        -backend-config="region=${{ env.AWS_REGION }}" \
-        -reconfigure
+      run: terraform -chdir=. init -backend-config="bucket=test-terraform-github" -backend-config="key=terraform.tfstate" -backend-config="region=${{ env.AWS_REGION }}" -reconfigure
 
     # 5️⃣ Terraform Format Check
     - name: Terraform Format Check
