@@ -1,0 +1,69 @@
+name: Terraform Deploy on Main Merge
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  id-token: write      # Required for OIDC
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: 1.6.6
+
+jobs:
+  terraform:
+    name: Terraform Pipeline
+    runs-on: ubuntu-latest
+
+    steps:
+    # 1️⃣ Checkout repository
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    # 2️⃣ Configure AWS Authentication (OIDC)
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: arn:aws:iam::746210887622:role/test-terraform-github
+        aws-region: ${{ env.AWS_REGION }}
+
+    # 3️⃣ Setup Terraform
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    # 4️⃣ Terraform Init (S3 backend)
+    - name: Terraform Init
+      run: terraform init \
+        -backend-config="bucket=test-terraform-github" \
+        -backend-config="key=terraform.tfstate" \
+        -backend-config="region=${{ env.AWS_REGION }}" \
+        -reconfigure
+
+    # 5️⃣ Terraform Format Check
+    - name: Terraform Format Check
+      run: terraform fmt -check -recursive
+
+    # 6️⃣ Terraform Validate
+    - name: Terraform Validate
+      run: terraform validate
+
+    # 7️⃣ Setup TFLint
+    - name: Setup TFLint
+      uses: terraform-linters/setup-tflint@v4
+
+    # 8️⃣ Run TFLint
+    - name: Run TFLint
+      run: tflint --recursive
+
+    # 9️⃣ Terraform Plan
+    - name: Terraform Plan
+      run: terraform plan -out=tfplan
+
+    # 🔟 Terraform Apply
+    - name: Terraform Apply
+      run: terraform apply -auto-approve tfplan
