@@ -6,7 +6,7 @@ on:
       - main
 
 permissions:
-  id-token: write      # Required for OIDC
+  id-token: write
   contents: read
 
 env:
@@ -36,29 +36,34 @@ jobs:
       with:
         terraform_version: ${{ env.TF_VERSION }}
 
+    # 4️⃣ Terraform Init
     - name: Terraform Init
       run: terraform -chdir=. init -backend-config="bucket=test-terraform-github" -backend-config="key=terraform.tfstate" -backend-config="region=${{ env.AWS_REGION }}" -reconfigure
 
-    # 5️⃣ Terraform Format Check
+    # 5️⃣ Terraform Format (auto-fix)
+    - name: Terraform Format
+      run: terraform fmt -recursive
+
+    # 6️⃣ Terraform Format Check (verify)
     - name: Terraform Format Check
       run: terraform fmt -check -recursive
 
-    # 6️⃣ Terraform Validate
+    # 7️⃣ Terraform Validate
     - name: Terraform Validate
       run: terraform validate
 
-    # 7️⃣ Setup TFLint
+    # 8️⃣ Setup TFLint
     - name: Setup TFLint
       uses: terraform-linters/setup-tflint@v4
 
-    # 8️⃣ Run TFLint
+    # 9️⃣ Run TFLint
     - name: Run TFLint
       run: tflint --recursive
 
-    # 9️⃣ Terraform Plan
+    # 🔟 Terraform Plan
     - name: Terraform Plan
       run: terraform plan -out=tfplan
 
-    # 🔟 Terraform Apply
+    # 1️⃣1️⃣ Terraform Apply
     - name: Terraform Apply
       run: terraform apply -auto-approve tfplan
