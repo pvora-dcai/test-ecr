@@ -36,9 +36,9 @@ jobs:
       with:
         terraform_version: ${{ env.TF_VERSION }}
 
-    # 4️⃣ Terraform Init
+    # 4️⃣ Terraform Init (S3 backend)
     - name: Terraform Init
-      run: terraform -chdir=. init -backend-config="bucket=test-terraform-github" -backend-config="key=terraform.tfstate" -backend-config="region=${{ env.AWS_REGION }}" -reconfigure
+      run: terraform init -backend-config="bucket=test-terraform-github" -backend-config="key=terraform.tfstate" -backend-config="region=${{ env.AWS_REGION }}" -reconfigure
 
     # 5️⃣ Terraform Format (auto-fix)
     - name: Terraform Format
@@ -60,10 +60,25 @@ jobs:
     - name: Run TFLint
       run: tflint --recursive
 
-    # 🔟 Terraform Plan
+    # 🔟 Terraform Plan (binary)
     - name: Terraform Plan
       run: terraform plan -out=tfplan
 
-    # 1️⃣1️⃣ Terraform Apply
+    # 1️⃣1️⃣ Generate Timestamp
+    - name: Generate Timestamp
+      run: echo "TS=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_ENV
+
+    # 1️⃣2️⃣ Export Plan to Readable Text File
+    - name: Export Plan to Text File
+      run: terraform show -no-color tfplan > terraform-plan-${{ env.TS }}.txt
+
+    # 1️⃣3️⃣ Upload Plan as Downloadable Artifact
+    - name: Upload Terraform Plan
+      uses: actions/upload-artifact@v4
+      with:
+        name: terraform-plan-${{ env.TS }}
+        path: terraform-plan-${{ env.TS }}.txt
+
+    # 1️⃣4️⃣ Terraform Apply
     - name: Terraform Apply
       run: terraform apply -auto-approve tfplan
